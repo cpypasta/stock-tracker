@@ -1,409 +1,374 @@
 import argparse
+import sys
 import yfinance as yf
-import pandas as pd
+import asciichartpy
+from portfolio import add_stock, remove_stock, get_holdings, get_tickers, get_transactions
+from tax_config import set_tax_rates, get_tax_rates, calculate_short_term_tax_on_gains, calculate_long_term_tax_on_gains
+from datetime import datetime
+from rich.console import Console
+from rich.table import Table
 
-def get_stock_data(ticker_symbol, days=7):
+ansi_colors = {
+    'green': '\033[32m',
+    'red': '\033[31m',
+    'yellow': '\033[33m',
+    'magenta': '\033[35m',
+    'cyan': '\033[36m',
+    'lightgray': '\033[37m',
+    'blue': '\033[34m',
+    'reset': '\033[0m'
+}
+
+TICKER_DISPLAY_NAMES = {
+    '^IXIC': 'NASDAQ',
+}
+
+def get_stock_data(ticker_symbol, days):
     """
-    Fetches the current stock price and historical data for a given ticker symbol.
+    Fetches historical stock data for a given ticker symbol.
     """
     try:
         ticker = yf.Ticker(ticker_symbol)
-        
-        # Get current market price
-        current_price = ticker.info.get('currentPrice')
-        if not current_price:
-            # Fallback for current price
-            todays_data = ticker.history(period='1d')
-            if not todays_data.empty:
-                current_price = todays_data['Close'].iloc[-1]
-            else:
-                current_price = None
-
-        # Get historical data for the specified number of days
         hist_data = ticker.history(period=f"{days}d")
-
-        if hist_data.empty and current_price is None:
-            return None, None, f"Could not find any data for the ticker {ticker_symbol}."
-        
-        return current_price, hist_data, None
-
+        return hist_data, None
     except Exception as e:
-        return None, None, f"Error fetching data for {ticker_symbol}: {e}"
+        return None, f"Error fetching data for {ticker_symbol}: {e}"
 
-def display_trend(historical_data, ticker_symbol, historical_data2=None, ticker_symbol2=None, mode='price'):
+
+def print_price(price, prev_close, ticker):
+    price_str = f"${price:.2f}"
+    display_ticker = TICKER_DISPLAY_NAMES.get(ticker, ticker)
+    ticker_str = f"{ansi_colors['lightgray']}{display_ticker}{ansi_colors['reset']}"
+    if prev_close is not None:
+        change = price - prev_close
+        pct_change = (change / prev_close * 100) if prev_close != 0 else 0
+        change_str = f"{change:+.2f}"
+        pct_str = f"({pct_change:+.1f}%)"
+        if change > 0:
+            arrow = f"{ansi_colors['green']}▲{ansi_colors['reset']}"
+            color_code = ansi_colors['green']
+        elif change < 0:
+            arrow = f"{ansi_colors['red']}▼{ansi_colors['reset']}"
+            color_code = ansi_colors['red']
+        else:
+            arrow = '→'
+            color_code = ansi_colors['lightgray']
+        content = f"{ticker_str}: {color_code}{price_str}{ansi_colors['reset']} {arrow} {change_str} {pct_str}"
+    else:
+        content = f"{ticker_str}: {price_str}"
+    print(content)
+
+
+def plot_stocks(tickers, days, mode='price', zero=False, now=False):
     """
-    Displays a simple vertical bar chart for the stock trend with integrated price labels.
-    Supports comparing two stocks side by side with colors.
-    Mode can be 'price' (absolute prices) or 'change' (day-to-day percentage change).
+    Plots stock data for one or more tickers using asciichartpy (terminal-only, line chart only).
+    mode: 'price' for absolute prices, 'change' for percent change.
     """
-    if historical_data is None or historical_data.empty:
-        print("No historical data to display trend.")
+    color_list = [
+        asciichartpy.green,
+        asciichartpy.red,
+        asciichartpy.yellow,
+        asciichartpy.magenta,
+        asciichartpy.cyan,
+        asciichartpy.lightgray
+    ]
+    color_names = [
+        'green',
+        'red',
+        'yellow',
+        'magenta',
+        'cyan',
+        'lightgray'
+    ]
+    data = {}
+    errors = {}
+    # Print current price info for each ticker above the chart
+    for ticker in tickers:
+        hist, error = get_stock_data(ticker, days)
+        if error or hist is None or hist.empty:
+            errors[ticker] = error or f"No data for {ticker}"
+            continue
+        if mode == 'change':
+            series = hist['Close'].pct_change().fillna(0) * 100
+        else:
+            series = hist['Close']
+        data[ticker] = series
+        # Print current price info (change from first day in range)
+        current_price = hist['Close'].iloc[-1]
+        first_close = hist['Close'].iloc[0] if len(hist['Close']) > 1 else None
+        print_price(current_price, first_close, ticker)
+    if not data:
+        print("No valid data to plot.")
+        for ticker, err in errors.items():
+            print(f"{ticker}: {err}")
         return
-
-    prices1 = historical_data['Close'].tolist()
-    prices2 = historical_data2['Close'].tolist() if historical_data2 is not None else None
-    
-    # Different max columns based on single vs comparison mode
-    max_columns = 7 if prices2 is not None else 14
-    
-    # Process both datasets if comparing
-    if prices2 is not None:
-        # Ensure both datasets have the same length by taking minimum
-        min_length = min(len(prices1), len(prices2))
-        prices1 = prices1[-min_length:]  # Take most recent data
-        prices2 = prices2[-min_length:]
-    
-    # If we have more data points than max columns, average them into groups
-    def average_prices(prices):
-        if len(prices) > max_columns:
-            group_size = len(prices) // max_columns
-            remainder = len(prices) % max_columns
-            
-            averaged_prices = []
-            start_idx = 0
-            
-            for i in range(max_columns):
-                current_group_size = group_size + (1 if i < remainder else 0)
-                end_idx = start_idx + current_group_size
-                
-                group_avg = sum(prices[start_idx:end_idx]) / current_group_size
-                averaged_prices.append(group_avg)
-                
-                start_idx = end_idx
-            
-            return averaged_prices
-        return prices
-    
-    prices1 = average_prices(prices1)
-    if prices2 is not None:
-        prices2 = average_prices(prices2)
-    
-    # Convert to price changes if mode is 'change'
+    series_list = [s.values.tolist() for s in data.values()]
+    colors = [color_list[i % len(color_list)] for i in range(len(series_list))]
+    legend_lines = []
+    for i, ticker in enumerate(data.keys()):
+        display_ticker = TICKER_DISPLAY_NAMES.get(ticker, ticker)
+        color = color_names[i % len(color_names)]
+        ansi = ansi_colors[color]
+        reset = ansi_colors['reset']
+        legend_lines.append(f"{display_ticker}: {ansi}{color}{reset}")
     if mode == 'change':
-        if len(prices1) > 1:
-            # Calculate day-to-day percentage changes
-            changes1 = [0.0]  # First day has no previous day, so 0% change
-            for i in range(1, len(prices1)):
-                change = ((prices1[i] - prices1[i-1]) / prices1[i-1]) * 100
-                changes1.append(change)
-            prices1 = changes1
+        zero_line = [0] * len(series_list[0])
+        series_list.append(zero_line)
+        colors.append(asciichartpy.blue)
+        # Do not add zero line to legend
+    # Use display names in chart title
+    display_names = [str(TICKER_DISPLAY_NAMES.get(t, t)) for t in data.keys()]
+    print(f"\n{' vs '.join(display_names)} - {'% Change' if mode == 'change' else 'Price ($)'} ({days} days)")
+    if len(data) > 1:
+        for line in legend_lines:
+            print("  " + line)
+        print()
+    plot_config = {'height': 12, 'colors': colors}
+    if mode == 'price' and zero:
+        plot_config['min'] = 0
+    print(asciichartpy.plot(series_list, plot_config))
+    if errors:
+        print("\nSome tickers could not be plotted:")
+        for ticker, err in errors.items():
+            print(f"{ticker}: {err}")
+
+
+def show_portfolio():
+    """Display portfolio with current prices and gains/losses."""
+    # default terminal color to lightgray
+    print(ansi_colors['lightgray'])
+
+    holdings = get_holdings()
+    if not holdings:
+        print("Portfolio is empty.")
+        return
+    
+    total_cost = 0
+    total_value = 0
+    total_after_tax_gain = 0
+    today = datetime.today().date()
+    
+    total_short_term_tax = 0
+    total_long_term_tax = 0
+    
+    # Remove ASCII separators and use rich table with title 'Portfolio'
+    portfolio_table = Table(show_header=True, header_style="bold magenta", title="Portfolio")
+    portfolio_table.add_column("Ticker", style="dim", justify="left")
+    portfolio_table.add_column("Shares", justify="right")
+    portfolio_table.add_column("Avg Price", justify="right")
+    portfolio_table.add_column("Value", justify="right")
+    portfolio_table.add_column("Gain/Loss", justify="right")
+    portfolio_table.add_column("After-tax", justify="right")
+    for ticker, holding in holdings.items():
+        shares = holding['shares']
+        avg_price = holding['avg_price']
+        cost_basis = shares * avg_price
+        total_cost += cost_basis
+        # Get current price
+        hist, error = get_stock_data(ticker, 1)
+        if error or hist is None or hist.empty:
+            current_price = 0
+            portfolio_table.add_row(ticker, f"{shares:,.2f}", f"${avg_price:,.2f}", "-", "-", "-")
+            continue
+        current_price = hist['Close'].iloc[-1]
+        current_value = shares * current_price
+        total_value += current_value
+        gain_loss = current_value - cost_basis
+        gain_loss_pct = (gain_loss / cost_basis * 100) if cost_basis > 0 else 0
+        if gain_loss > 0:
+            color = 'green'
+            arrow = '▲'
+        elif gain_loss < 0:
+            color = 'red'
+            arrow = '▼'
+        else:
+            color = 'grey58'
+            arrow = '→'
+        # Calculate after-tax gain/loss for each lot
+        txs = get_transactions(ticker)
+        after_tax_gain = 0
+        for tx in txs:
+            lot_shares = tx['shares']
+            lot_cost = lot_shares * tx['price_paid']
+            lot_value = lot_shares * current_price
+            lot_gain = lot_value - lot_cost
+            try:
+                lot_date = datetime.strptime(tx['date'], '%Y-%m-%d').date()
+            except Exception:
+                lot_date = today
+            holding_days = (today - lot_date).days
+            if lot_gain > 0:
+                if holding_days > 365:
+                    tax = calculate_long_term_tax_on_gains(lot_gain)
+                    total_long_term_tax += float(tax['total'])
+                else:
+                    tax = calculate_short_term_tax_on_gains(lot_gain)
+                    total_short_term_tax += float(tax['total'])
+                after_tax_gain += lot_gain - float(tax['total'])
+            else:
+                after_tax_gain += lot_gain
+        total_after_tax_gain += after_tax_gain
+        if after_tax_gain > 0:
+            at_color = 'green'
+            at_arrow = '▲'
+        elif after_tax_gain < 0:
+            at_color = 'red'
+            at_arrow = '▼'
+        else:
+            at_color = 'grey58'
+            at_arrow = '→'
+        gain_loss_str = f"[{color}]{arrow} ${gain_loss:+,.2f} ({gain_loss_pct:+.1f}%)[/{color}]"
+        after_tax_pct = (after_tax_gain / cost_basis * 100) if cost_basis > 0 else 0
+        after_tax_str = f"[{at_color}]{at_arrow} ${after_tax_gain:+,.2f} ({after_tax_pct:+.1f}%)[/{at_color}]"
+        portfolio_table.add_row(
+            ticker,
+            f"{shares:,.2f}",
+            f"${avg_price:,.2f}",
+            f"${current_value:,.2f}",
+            gain_loss_str,
+            after_tax_str
+        )
+    console = Console()
+    console.print(portfolio_table)
+    
+    total_gain_loss = total_value - total_cost
+    total_gain_loss_pct = (total_gain_loss / total_cost * 100) if total_cost > 0 else 0
+    
+    # Table for totals using rich
+    def rich_gain_loss(val, arrow, color):
+        return f"[{color}]{arrow} ${val:+,.2f}[/{color}]"
+    total_table = Table(show_header=True, header_style="bold magenta", title="Totals")
+    total_table.add_column("Total", style="dim", justify="left")
+    total_table.add_column("Amount", justify="right")
+    total_table.add_row("Total Cost", f"${total_cost:,.2f}")
+    total_table.add_row("Total Value", f"${total_value:,.2f}")
+    total_table.add_row("Gain/Loss", rich_gain_loss(total_gain_loss, arrow, color))
+    total_table.add_row("After-tax Total", rich_gain_loss(total_after_tax_gain, at_arrow, at_color))
+    total_table.add_row("Short-term taxes", f"${total_short_term_tax:,.2f}")
+    total_table.add_row("Long-term taxes", f"${total_long_term_tax:,.2f}")
+    console.print(total_table)
+    # Table for tax summary using rich
+    config = get_tax_rates()
+    nii_rate = 3.8 if config['nii'] else 0.0
+    st_total_pct = config['short_term_federal'] + config['state'] + nii_rate
+    lt_total_pct = config['long_term_federal'] + config['state'] + nii_rate
+    tax_table = Table(show_header=True, header_style="bold magenta", title="Taxes")
+    tax_table.add_column("Tax Type", style="dim", justify="left")
+    tax_table.add_column("Rate", justify="right")
+    tax_table.add_row("Short-term Federal", f"{config['short_term_federal']}%")
+    tax_table.add_row("Long-term Federal", f"{config['long_term_federal']}%")
+    tax_table.add_row("State", f"{config['state']}%")
+    tax_table.add_row("NII", f"{nii_rate:.1f}%")
+    tax_table.add_row("Total Short-term Taxes", f"{st_total_pct:.1f}%")
+    tax_table.add_row("Total Long-term Taxes", f"{lt_total_pct:.1f}%")
+    console.print(tax_table)
+    print(ansi_colors['reset'])
+
+
+def main():
+    # Check if first argument is a subcommand
+    if len(sys.argv) > 1 and sys.argv[1] in ['buy', 'sell', 'port', 'list', 'tax-set', 'tax-show']:
+        # Use subparsers for portfolio and tax commands
+        parser = argparse.ArgumentParser(description="Stock Tracker CLI (asciichartpy terminal version)")
+        subparsers = parser.add_subparsers(dest='command', help='Available commands')
         
-        if prices2 is not None and len(prices2) > 1:
-            # Calculate day-to-day percentage changes
-            changes2 = [0.0]  # First day has no previous day, so 0% change
-            for i in range(1, len(prices2)):
-                change = ((prices2[i] - prices2[i-1]) / prices2[i-1]) * 100
-                changes2.append(change)
-            prices2 = changes2
-    
-    # Create properly separated vertical bars
-    all_prices = prices1 + (prices2 if prices2 else [])
-    max_price = max(all_prices)
-    min_price = min(all_prices)
-    price_range = max_price - min_price if max_price > min_price else 1
-    
-    max_height = 10
-    
-    print()  # Add spacing
-    
-    # Show comparison title if two stocks
-    if prices2 is not None:
-        mode_text = "Daily Change %" if mode == 'change' else "Price Comparison"
-        print(f"{ticker_symbol} vs {ticker_symbol2} - {mode_text}")
-        print()
-    elif mode == 'change':
-        print(f"{ticker_symbol} - Daily Change %")
-        print()
-    
-    # ANSI color codes
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    RESET = '\033[0m'
-    
-    # For change mode, we need to handle negative values differently
-    if mode == 'change':
-        # Find the baseline (0% change) position - put it in the middle
-        baseline_position = max_height // 2
-    
-    # Increase chart height to accommodate labels for both modes
-    chart_height = max_height + 2
-    
-    # Create the bars row by row (top to bottom)
-    for row in range(chart_height, 0, -1):
-        line = ""
-        for i in range(len(prices1)):
-            if prices2 is not None:
-                # Calculate heights for both stocks
-                if mode == 'change':
-                    # For change mode, bars go up or down from baseline
-                    # Positive changes go up, negative changes go down
-                    if prices1[i] >= 0:
-                        # Positive: show bar from baseline up
-                        bar_height1 = max(1, int((prices1[i] / max(abs(max_price), abs(min_price))) * (max_height // 2)))
-                        show_bar1 = row > baseline_position and row <= (baseline_position + bar_height1)
-                        # Show label above positive bars (including 0%) - ensure it's within bounds
-                        label_row1 = min(baseline_position + bar_height1 + 1, chart_height)
-                        show_label1 = row == label_row1
-                    else:
-                        # Negative: show bar from baseline down
-                        bar_height1 = max(1, int((abs(prices1[i]) / max(abs(max_price), abs(min_price))) * (max_height // 2)))
-                        show_bar1 = row >= (baseline_position - bar_height1) and row <= baseline_position
-                        # Show label below negative bars - if it would go out of bounds, show above baseline instead
-                        ideal_label_row1 = baseline_position - bar_height1 - 1
-                        if ideal_label_row1 < 1:
-                            # If label would be out of bounds, place it above the baseline
-                            label_row1 = baseline_position + 1
-                        else:
-                            label_row1 = ideal_label_row1
-                        show_label1 = row == label_row1
-                    
-                    if prices2[i] >= 0:
-                        # Positive: show bar from baseline up
-                        bar_height2 = max(1, int((prices2[i] / max(abs(max_price), abs(min_price))) * (max_height // 2)))
-                        show_bar2 = row > baseline_position and row <= (baseline_position + bar_height2)
-                        # Show label above positive bars (including 0%) - ensure it's within bounds
-                        label_row2 = min(baseline_position + bar_height2 + 1, chart_height)
-                        show_label2 = row == label_row2
-                    else:
-                        # Negative: show bar from baseline down
-                        bar_height2 = max(1, int((abs(prices2[i]) / max(abs(max_price), abs(min_price))) * (max_height // 2)))
-                        show_bar2 = row >= (baseline_position - bar_height2) and row <= baseline_position
-                        # Show label below negative bars - if it would go out of bounds, show above baseline instead
-                        ideal_label_row2 = baseline_position - bar_height2 - 1
-                        if ideal_label_row2 < 1:
-                            # If label would be out of bounds, place it above the baseline
-                            label_row2 = baseline_position + 1
-                        else:
-                            label_row2 = ideal_label_row2
-                        show_label2 = row == label_row2
-                        
-                    # Show baseline (0% line) for change mode
-                    if row == baseline_position:
-                        if i > 0:
-                            line += "   "  # Space between column groups
-                        line += "----"  # Baseline for first stock
-                        line += " "     # Space between bars
-                        line += "----"  # Baseline for second stock
-                        continue
+        buy_parser = subparsers.add_parser('buy', help='Buy shares of a stock')
+        buy_parser.add_argument('ticker', help='Stock ticker symbol')
+        buy_parser.add_argument('shares', type=float, help='Number of shares')
+        buy_parser.add_argument('price', type=float, help='Price paid per share')
+        buy_parser.add_argument('--date', type=str, help='Date of purchase (YYYY-MM-DD)', required=False)
+        
+        sell_parser = subparsers.add_parser('sell', help='Sell shares of a stock')
+        sell_parser.add_argument('ticker', help='Stock ticker symbol')
+        sell_parser.add_argument('shares', type=float, nargs='?', help='Number of shares (if not specified, sell all)')
+        
+        portfolio_parser = subparsers.add_parser('portfolio', help='Show portfolio with current prices and gains/losses')
+        port_parser = subparsers.add_parser('port', help='Show portfolio (alias for portfolio)')
+        
+        list_parser = subparsers.add_parser('list', help='List all tickers in portfolio')
+        
+        tax_set_parser = subparsers.add_parser('tax-set', help='Set tax configuration')
+        tax_set_parser.add_argument('short_term_federal', type=float, help='Short-term federal tax rate (percentage)')
+        tax_set_parser.add_argument('long_term_federal', type=float, help='Long-term federal tax rate (percentage)')
+        tax_set_parser.add_argument('state', type=float, help='State tax rate (percentage)')
+        tax_set_parser.add_argument('--nii', action='store_true', help='Subject to Net Investment Income tax')
+        
+        tax_show_parser = subparsers.add_parser('tax-show', help='Show current tax configuration')
+        
+        args = parser.parse_args()
+        
+        if args.command == 'buy':
+            add_stock(args.ticker, args.shares, args.price, args.date)
+            print(f"Added {args.shares} shares of {args.ticker.upper()} at ${args.price:.2f}" + (f" on {args.date}" if args.date else ""))
+        
+        elif args.command == 'sell':
+            try:
+                remove_stock(args.ticker, args.shares)
+                if args.shares:
+                    print(f"Sold {args.shares} shares of {args.ticker.upper()}")
                 else:
-                    # Price mode - calculate bar heights and label positions
-                    height1 = max(1, int(((prices1[i] - min_price) / price_range) * max_height))
-                    height2 = max(1, int(((prices2[i] - min_price) / price_range) * max_height))
-                    show_bar1 = row <= height1
-                    show_bar2 = row <= height2
-                    
-                    # Show price labels above bars
-                    label_row1 = height1 + 1
-                    label_row2 = height2 + 1
-                    show_label1 = row == label_row1
-                    show_label2 = row == label_row2
-                
-                if i > 0:
-                    line += "   "  # Space between column groups
-                
-                # First stock bar (red) with labels
-                if show_bar1:
-                    line += f"{RED}████{RESET}"
-                elif mode == 'price' and show_label1:
-                    # Show price label above bar
-                    label = f"${prices1[i]:.0f}"[:4]  # Format price and truncate to fit
-                    line += f"{label:^4}"
-                elif mode == 'change' and show_label1:
-                    # Show percentage label above/below bar
-                    label = f"{prices1[i]:+.0f}%"[:4]  # Truncate to fit in bar width
-                    line += f"{label:^4}"
-                else:
-                    line += "    "
-                
-                line += " "  # Space between the two bars
-                
-                # Second stock bar (green) with labels
-                if show_bar2:
-                    line += f"{GREEN}████{RESET}"
-                elif mode == 'price' and show_label2:
-                    # Show price label above bar
-                    label = f"${prices2[i]:.0f}"[:4]  # Format price and truncate to fit
-                    line += f"{label:^4}"
-                elif mode == 'change' and show_label2:
-                    # Show percentage label above/below bar
-                    label = f"{prices2[i]:+.0f}%"[:4]  # Truncate to fit in bar width
-                    line += f"{label:^4}"
-                else:
-                    line += "    "
+                    print(f"Sold all shares of {args.ticker.upper()}")
+            except ValueError as e:
+                print(f"Error: {e}")
+        
+        elif args.command == 'port':
+            show_portfolio()
+        
+        elif args.command == 'list':
+            tickers = get_tickers()
+            if tickers:
+                print("Portfolio Stocks:")
+                holdings = get_holdings()
+                for ticker in tickers:
+                    shares = holdings[ticker]['shares']
+                    print(f"  {ticker}: {shares:,.2f}")
             else:
-                # Single stock display
-                if mode == 'change':
-                    # For change mode, bars go up or down from baseline
-                    if prices1[i] >= 0:
-                        # Positive: show bar from baseline up
-                        bar_height = max(1, int((prices1[i] / max(abs(max_price), abs(min_price))) * (max_height // 2)))
-                        show_bar = row > baseline_position and row <= (baseline_position + bar_height)
-                        # Show label above positive bars (including 0%) - ensure it's within bounds
-                        label_row = min(baseline_position + bar_height + 1, chart_height)
-                        show_label = row == label_row
-                    else:
-                        # Negative: show bar from baseline down
-                        bar_height = max(1, int((abs(prices1[i]) / max(abs(max_price), abs(min_price))) * (max_height // 2)))
-                        show_bar = row >= (baseline_position - bar_height) and row <= baseline_position
-                        # Show label below negative bars - if it would go out of bounds, show above baseline instead
-                        ideal_label_row = baseline_position - bar_height - 1
-                        if ideal_label_row < 1:
-                            # If label would be out of bounds, place it above the baseline
-                            label_row = baseline_position + 1
-                        else:
-                            label_row = ideal_label_row
-                        show_label = row == label_row
-                
-                else:
-                    # Price mode - calculate bar height and label position
-                    normalized_height = max(1, int(((prices1[i] - min_price) / price_range) * max_height))
-                    show_bar = row <= normalized_height
-                    
-                    # Show price label above bar - ensure it's within bounds
-                    label_row = min(normalized_height + 1, chart_height)
-                    show_label = row == label_row
-                
-                if i > 0:
-                    line += "  "  # Space between columns
-                
-                if show_bar:
-                    line += "██████"  # Bar segment
-                elif mode == 'price' and show_label:
-                    # Show price label above bar
-                    label = f"${prices1[i]:.0f}"[:6]  # Format price and truncate to fit
-                    line += f"{label:^6}"
-                elif mode == 'change' and show_label:
-                    # Show percentage label above/below bar
-                    label = f"{prices1[i]:+.0f}%"[:6]  # Truncate to fit in bar width
-                    line += f"{label:^6}"
-                else:
-                    line += "      "  # Empty space
-        print(line)
+                print("Portfolio is empty.")
+        
+        elif args.command == 'tax-set':
+            set_tax_rates(args.short_term_federal, args.long_term_federal, args.state, args.nii)
+            print(f"Tax configuration set:")
+            print(f"  Short-term Federal: {args.short_term_federal}%")
+            print(f"  Long-term Federal: {args.long_term_federal}%")
+            print(f"  State: {args.state}%")
+            print(f"  NII: {args.nii}")
+        
+        elif args.command == 'tax-show':
+            config = get_tax_rates()
+            print("Current tax configuration:")
+            print(f"  Short-term Federal: {config['short_term_federal']}%")
+            print(f"  Long-term Federal: {config['long_term_federal']}%")
+            print(f"  State: {config['state']}%")
+            print(f"  NII: {config['nii']}")
     
-    # Remove the separate label section since labels are now embedded
-    # Show legend if comparing two stocks
-    if prices2 is not None:
-        print()
-        print(f"{RED}████{RESET} {ticker_symbol}    {GREEN}████{RESET} {ticker_symbol2}")
-    
-    print()  # Add spacing
+    else:
+        # Treat as chart command
+        parser = argparse.ArgumentParser(description="Show stock charts")
+        parser.add_argument("ticker", nargs='+', help="Stock ticker symbol(s) (e.g., AAPL GOOGL TSLA)")
+        parser.add_argument("--days", type=int, help="Number of days to display. If not provided, only show the current price.")
+        parser.add_argument("--mode", choices=['price', 'change'], default='price',
+                           help="Display mode: 'price' for absolute prices, 'change' for daily percent change (default: price)")
+        parser.add_argument("--zero", action='store_true', help="In price mode, start y-axis at 0 instead of min price.")
+        parser.add_argument("--base", action='store_true', help="Include NASDAQ (^IXIC) as a base ticker.")
+        
+        args = parser.parse_args()
+        
+        tickers = args.ticker[:]
+        if args.base and '^IXIC' not in tickers:
+            tickers.append('^IXIC')
 
-def create_change_chart(stock_data, width=80, height=10, title="Daily Change %"):
-    changes = stock_data['Close'].pct_change() * 100
-    
-    # Calculate max change for scaling
-    max_change = max(abs(changes.max()), abs(changes.min())) if not changes.empty else 1
-    
-    # Chart title
-    title = title[:width]  # Truncate title to fit width
-    title_padding = (width - len(title)) // 2
-    chart = ["" for _ in range(height + 4)]  # Extra space for title and labels
-    
-    # Create baseline
-    baseline_row = height // 2 + 2
-    chart[baseline_row] = " " * width
-    
-    # Draw bars
-    for i, change in enumerate(changes):
-        if abs(change) > 0.01:  # Only show significant changes
-            bar_height = max(1, int(abs(change) * height / max_change))
-            if change > 0:
-                # Positive change
-                for h in range(bar_height):
-                    if baseline_row - h - 1 >= 0:
-                        chart[baseline_row - h - 1] = (
-                            chart[baseline_row - h - 1][:i * 8] + "█" + chart[baseline_row - h - 1][i * 8 + 1:]
-                        )
-            else:
-                # Negative change
-                for h in range(bar_height):
-                    if baseline_row + h + 1 < len(chart):
-                        chart[baseline_row + h + 1] = (
-                            chart[baseline_row + h + 1][:i * 8] + "█" + chart[baseline_row + h + 1][i * 8 + 1:]
-                        )
-    
-    # Add percentage labels
-    for i, change in enumerate(changes):
-        if abs(change) > 0.01:  # Show labels for changes > 0.01%
-            bar_height = max(1, int(abs(change) * height / max_change))
-            
-            # Calculate label position more carefully
-            if change > 0:
-                # For positive changes, place label above the bar
-                if bar_height == 1:
-                    # For very small positive bars, place label 2 rows above baseline
-                    label_row = baseline_row - 2
-                else:
-                    # For larger bars, place at the top
-                    label_row = baseline_row - bar_height - 1
-            else:
-                # For negative changes, place label below the bar
-                if bar_height == 1:
-                    # For very small negative bars, place label 2 rows below baseline
-                    label_row = baseline_row + 2
-                else:
-                    # For larger bars, place at the bottom
-                    label_row = baseline_row + bar_height + 1
-            
-            # Ensure label is within chart bounds
-            if 0 <= label_row < height + 4:  # Extended bounds for labels
-                label = f"{change:+.0f}%"
-                # Calculate horizontal position to center the label
-                label_start = max(0, i * 8 + 4 - len(label) // 2)
-                label_end = min(width, label_start + len(label))
-                
-                # Only place label if it fits within bounds
-                if label_start < width and label_end > 0:
-                    # Adjust label if it would be cut off
-                    if label_end > width:
-                        label = label[:width - label_start]
-                    if label_start < 0:
-                        label = label[-label_start:]
-                        label_start = 0
-                    
-                    # Place the label
-                    existing_line = chart[label_row] if label_row < len(chart) else ' ' * width
-                    chart[label_row] = existing_line[:label_start] + label + existing_line[label_start + len(label):]
-
-    # Add title to chart
-    chart_title = f"{'=' * title_padding}{title}{'=' * (width - len(title) - title_padding)}"
-    chart.insert(0, chart_title)
-    
-    # Print the chart
-    for line in chart:
-        print(line)
+        if args.days is None:
+            # Show only the current price(s)
+            for ticker in tickers:
+                hist, error = get_stock_data(ticker, 2)
+                if error or hist is None or hist.empty:
+                    print(f"{ticker}: Error or no data")
+                    continue
+                current_price = hist['Close'].iloc[-1]
+                prev_close = hist['Close'].iloc[-2] if len(hist['Close']) > 1 else None
+                print_price(current_price, prev_close, ticker)
+        else:
+            plot_stocks(tickers, args.days, args.mode, args.zero, now=False)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Stock Tracker CLI")
-    parser.add_argument("ticker", help="Stock ticker symbol (e.g., AAPL, GOOGL)")
-    parser.add_argument("ticker2", nargs="?", help="Second stock ticker for comparison (optional)")
-    parser.add_argument("--days", type=int, default=7, help="Number of days to display (default: 7)")
-    parser.add_argument("--mode", choices=['price', 'change'], default='price', 
-                       help="Display mode: 'price' for absolute prices, 'change' for percentage change from first day (default: price)")
-    args = parser.parse_args()
-
-    # Get data for first stock
-    current_price1, historical_data1, error1 = get_stock_data(args.ticker, args.days)
-    
-    # Get data for second stock if provided
-    current_price2, historical_data2, error2 = None, None, None
-    if args.ticker2:
-        current_price2, historical_data2, error2 = get_stock_data(args.ticker2, args.days)
-
-    # Display results
-    if error1:
-        print(error1)
-    else:
-        if current_price1 is not None:
-            print(f"The current price of {args.ticker} is: ${current_price1:.2f}")
-        
-        if args.ticker2:
-            if error2:
-                print(error2)
-            elif current_price2 is not None:
-                print(f"The current price of {args.ticker2} is: ${current_price2:.2f}")
-
-        if historical_data1 is not None and not historical_data1.empty:
-            display_trend(historical_data1, args.ticker, historical_data2, args.ticker2, args.mode)
-        else:
-            print("No historical data available to display trend.")
+    main()

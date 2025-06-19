@@ -1,1 +1,4 @@
 env
+stock.egg-info
+__pycache__
+build

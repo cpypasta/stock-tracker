@@ -1,0 +1,66 @@
+{
+  "DE": [
+    {
+      "shares": 18.0,
+      "price_paid": 440.44,
+      "date": "2025-12-13"
+    },
+    {
+      "shares": 1.598,
+      "price_paid": 348.47,
+      "date": "2021-11-30"
+    },
+    {
+      "shares": 1.598,
+      "price_paid": 348.47,
+      "date": "2021-10-29"
+    },
+    {
+      "shares": 1.59,
+      "price_paid": 350.14,
+      "date": "2021-9-30"
+    },
+    {
+      "shares": 1.463,
+      "price_paid": 380.14,
+      "date": "2021-8-31"
+    },
+    {
+      "shares": 1.549,
+      "price_paid": 359.49,
+      "date": "2021-7-30"
+    },
+    {
+      "shares": 1.586,
+      "price_paid": 351.2,
+      "date": "2021-7-30"
+    },
+    {
+      "shares": 1.548,
+      "price_paid": 359.62,
+      "date": "2021-5-28"
+    },
+    {
+      "shares": 1.495,
+      "price_paid": 372.38,
+      "date": "2021-4-30"
+    }
+  ],
+  "TSLA": [
+    {
+      "shares": 1.0,
+      "price_paid": 283.25,
+      "date": "2025-6-5"
+    },
+    {
+      "shares": 2.0,
+      "price_paid": 301.34,
+      "date": "2025-6-6"
+    },
+    {
+      "shares": 32.0,
+      "price_paid": 284.56,
+      "date": "2025-6-5"
+    }
+  ]
+}
