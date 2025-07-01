@@ -243,9 +243,7 @@ def show_portfolio():
     total_table.add_row("Total Cost", f"${total_cost:,.2f}")
     total_table.add_row("Change", rich_gain_loss(total_gain_loss, arrow, color))    
     total_table.add_row("Total Value", f"${total_value:,.2f}")
-    total_table.add_row("Short-term taxes", f"${total_short_term_tax:,.2f}")
-    total_table.add_row("Long-term taxes", f"${total_long_term_tax:,.2f}")    
-    total_table.add_row("Total taxes", f"${total_short_term_tax + total_long_term_tax:,.2f}")            
+    total_table.add_row("Total taxes", f"[red](${total_short_term_tax + total_long_term_tax:,.2f})[/red]")            
     total_table.add_row("After-tax Change", rich_gain_loss(total_after_tax_gain, at_arrow, at_color))
     
     # Calculate total cash value (original cost + after-tax gain)
@@ -258,15 +256,37 @@ def show_portfolio():
     nii_rate = 3.8 if config['nii'] else 0.0
     st_total_pct = config['short_term_federal'] + config['state'] + nii_rate
     lt_total_pct = config['long_term_federal'] + config['state'] + nii_rate
-    tax_table = Table(show_header=True, header_style="bold magenta", title="Taxes")
+    
+    # Calculate individual tax amounts
+    total_taxes = total_short_term_tax + total_long_term_tax
+    if st_total_pct > 0:
+        st_federal_amount = total_short_term_tax * (config['short_term_federal'] / st_total_pct)
+        st_state_amount = total_short_term_tax * (config['state'] / st_total_pct)
+        st_nii_amount = total_short_term_tax * (nii_rate / st_total_pct) if config['nii'] else 0
+    else:
+        st_federal_amount = st_state_amount = st_nii_amount = 0
+        
+    if lt_total_pct > 0:
+        lt_federal_amount = total_long_term_tax * (config['long_term_federal'] / lt_total_pct)
+        lt_state_amount = total_long_term_tax * (config['state'] / lt_total_pct)
+        lt_nii_amount = total_long_term_tax * (nii_rate / lt_total_pct) if config['nii'] else 0
+    else:
+        lt_federal_amount = lt_state_amount = lt_nii_amount = 0
+    
+    total_federal = st_federal_amount + lt_federal_amount
+    total_state = st_state_amount + lt_state_amount
+    total_nii = st_nii_amount + lt_nii_amount
+    
+    tax_table = Table(show_header=True, header_style="bold magenta", title="Tax Breakdown")
     tax_table.add_column("Tax Type", style="dim", justify="left")
     tax_table.add_column("Rate", justify="right")
-    tax_table.add_row("Short-term Federal", f"{config['short_term_federal']}%")
-    tax_table.add_row("Long-term Federal", f"{config['long_term_federal']}%")
-    tax_table.add_row("State", f"{config['state']}%")
-    tax_table.add_row("NII", f"{nii_rate:.1f}%")
-    tax_table.add_row("Total Short-term Taxes", f"{st_total_pct:.1f}%")
-    tax_table.add_row("Total Long-term Taxes", f"{lt_total_pct:.1f}%")
+    tax_table.add_column("Amount", justify="right")
+    tax_table.add_row("Short-term Federal", f"{config['short_term_federal']}%", f"${st_federal_amount:,.2f}")
+    tax_table.add_row("Long-term Federal", f"{config['long_term_federal']}%", f"${lt_federal_amount:,.2f}")
+    tax_table.add_row("State", f"{config['state']}%", f"${total_state:,.2f}")
+    if config['nii']:
+        tax_table.add_row("NII", f"{nii_rate:.1f}%", f"${total_nii:,.2f}")
+    tax_table.add_row("Total Taxes", "-", f"${total_short_term_tax + total_long_term_tax:,.2f}")
     console.print(tax_table)
     print(ansi_colors['reset'])
 
