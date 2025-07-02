@@ -2,7 +2,7 @@ import argparse
 import sys
 import yfinance as yf
 import asciichartpy
-from portfolio import add_stock, remove_stock, get_holdings, get_tickers, get_transactions
+from portfolio import add_stock, remove_stock, get_holdings, get_tickers, get_transactions, get_remaining_lots, Portfolio
 from tax_config import set_tax_rates, get_tax_rates, calculate_short_term_tax_on_gains, calculate_long_term_tax_on_gains
 from datetime import datetime
 from rich.console import Console
@@ -184,19 +184,24 @@ def show_portfolio():
         else:
             color = 'grey58'
             arrow = '→'
-        # Calculate after-tax gain/loss for each lot
-        txs = get_transactions(ticker)
+        # Calculate after-tax gain/loss for remaining shares using FIFO
+        remaining_lots = get_remaining_lots(ticker)
+        
+        # Calculate after-tax gain only on remaining lots
         after_tax_gain = 0
-        for tx in txs:
-            lot_shares = tx['shares']
-            lot_cost = lot_shares * tx['price_paid']
+        for lot in remaining_lots:
+            lot_shares = lot['shares']
+            lot_cost = lot_shares * lot['price']
             lot_value = lot_shares * current_price
             lot_gain = lot_value - lot_cost
+            
             try:
-                lot_date = datetime.strptime(tx['date'], '%Y-%m-%d').date()
+                lot_date = datetime.strptime(lot['date'], '%Y-%m-%d').date()
             except Exception:
                 lot_date = today
+            
             holding_days = (today - lot_date).days
+            
             if lot_gain > 0:
                 if holding_days > 365:
                     tax = calculate_long_term_tax_on_gains(lot_gain)
@@ -291,9 +296,143 @@ def show_portfolio():
     print(ansi_colors['reset'])
 
 
+def show_trades(ticker):
+    """Display trade history for a specific ticker."""
+    ticker = ticker.upper()
+    transactions = get_transactions(ticker)
+    
+    if not transactions:
+        print(f"No trades found for {ticker}")
+        return
+    
+    # Sort transactions by date (oldest first)
+    def parse_date(date_str):
+        try:
+            return datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            try:
+                # Handle dates like "2021-4-30" (single digit month/day)
+                return datetime.strptime(date_str, '%Y-%m-%d').date()
+            except ValueError:
+                # If parsing fails, return a very old date so it sorts first
+                return datetime(1900, 1, 1).date()
+    
+    transactions = sorted(transactions, key=lambda tx: parse_date(tx['date']))
+    
+    # Get current price to calculate price change
+    hist, error = get_stock_data(ticker, 1)
+    current_price = None
+    if not error and hist is not None and not hist.empty:
+        current_price = hist['Close'].iloc[-1]
+    
+    # Create table for trades
+    console = Console()
+    trades_table = Table(show_header=True, header_style="bold magenta", title=f"{ticker} Trade History")
+    trades_table.add_column("Date", style="dim", justify="left")
+    trades_table.add_column("Type", justify="center")
+    trades_table.add_column("Shares", justify="right")
+    trades_table.add_column("Price", justify="right")
+    trades_table.add_column("Value", justify="right")
+    trades_table.add_column("Price Change", justify="right")
+    
+    for tx in transactions:
+        shares = tx['shares']
+        price = tx['price_paid']
+        date = tx['date']
+        tx_type_raw = tx.get('type', 'BUY')  # Default to BUY for backward compatibility
+        
+        # Determine transaction type and format
+        if tx_type_raw == 'SELL':
+            tx_type = "[red]SELL[/red]"
+        else:
+            tx_type = "[green]BUY[/green]"
+        
+        # Calculate current value and price change
+        if current_price is not None:
+            current_value = shares * current_price
+            
+            if tx_type_raw == 'SELL':
+                # For SELL transactions, we need to show the profit/loss vs average cost basis
+                # Use FIFO accounting to get the correct cost basis of remaining shares
+                portfolio_obj = Portfolio()
+                holdings = portfolio_obj.get_portfolio()
+                
+                if ticker in holdings:
+                    # Use the FIFO-calculated average cost basis of remaining shares
+                    avg_cost_basis = holdings[ticker]['avg_price']
+                    
+                    # For SELL: show profit/loss vs cost basis
+                    price_change = price - avg_cost_basis
+                    price_change_pct = (price_change / avg_cost_basis * 100) if avg_cost_basis != 0 else 0
+                    
+                    # Format price change for SELL transactions
+                    if price_change > 0.001:  # Small tolerance for floating point precision
+                        color = 'green'
+                        arrow = '▲'
+                        price_change_str = f"[{color}]{arrow} ${price_change:+.2f} ({price_change_pct:+.1f}%)[/{color}]"
+                    elif price_change < -0.001:  # Small tolerance for floating point precision
+                        color = 'red'
+                        arrow = '▼'
+                        price_change_str = f"[{color}]{arrow} ${price_change:+.2f} ({price_change_pct:+.1f}%)[/{color}]"
+                    else:
+                        color = 'grey58'
+                        arrow = '→'
+                        price_change_str = f"[{color}]{arrow} $0.00 (0.0%)[/{color}]"
+                    
+                    # Value shows what those shares would be worth at current price
+                    # Show in red parentheses since they were sold (no longer owned)
+                    value_str = f"[red](${current_value:,.2f})[/red]"
+                else:
+                    # No remaining position found, can't calculate cost basis
+                    price_change = 0
+                    price_change_pct = 0
+                    price_change_str = "N/A"
+                    value_str = f"[red](${current_value:,.2f})[/red]"
+            else:
+                # For BUY transactions: show current value vs purchase price
+                price_change = current_price - price
+                price_change_pct = (price_change / price * 100) if price != 0 else 0
+                
+                # Value column - always show positive value without conditional coloring
+                value_str = f"${current_value:,.2f}"
+                
+                # Format price change column (no asterisk for BUY)
+                if price_change > 0.001:  # Small tolerance for floating point precision
+                    color = 'green'
+                    arrow = '▲'
+                    price_change_str = f"[{color}]{arrow} ${price_change:+.2f} ({price_change_pct:+.1f}%)[/{color}]"
+                elif price_change < -0.001:  # Small tolerance for floating point precision
+                    color = 'red'
+                    arrow = '▼'
+                    price_change_str = f"[{color}]{arrow} ${price_change:+.2f} ({price_change_pct:+.1f}%)[/{color}]"
+                else:
+                    color = 'grey58'
+                    arrow = '→'
+                    price_change_str = f"[{color}]{arrow} $0.00 (0.0%)[/{color}]"
+        else:
+            value_str = "N/A"
+            price_change_str = "N/A"
+        
+        trades_table.add_row(
+            date,
+            tx_type,
+            f"{shares:,.2f}",
+            f"${price:.2f}",
+            value_str,
+            price_change_str
+        )
+    
+    console.print(trades_table)
+    
+    if current_price is not None:
+        print(f"\nCurrent {ticker} price: ${current_price:.2f}")
+    else:
+        print(f"\nCould not fetch current {ticker} price")
+
+
 def main():
     # Check if first argument is a subcommand
-    if len(sys.argv) > 1 and sys.argv[1] in ['buy', 'sell', 'port', 'list', 'tax-set', 'tax-show']:
+    if len(sys.argv) > 1 and sys.argv[1] in ['buy', 'sell', 'port', 'list', 'tax-set', 'tax-show', 'trades']:
         # Use subparsers for portfolio and tax commands
         parser = argparse.ArgumentParser(description="Stock Tracker CLI (asciichartpy terminal version)")
         subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -306,7 +445,9 @@ def main():
         
         sell_parser = subparsers.add_parser('sell', help='Sell shares of a stock')
         sell_parser.add_argument('ticker', help='Stock ticker symbol')
-        sell_parser.add_argument('shares', type=float, nargs='?', help='Number of shares (if not specified, sell all)')
+        sell_parser.add_argument('shares', type=float, help='Number of shares to sell')
+        sell_parser.add_argument('price', type=float, help='Price sold per share')
+        sell_parser.add_argument('--date', type=str, help='Date of sale (YYYY-MM-DD)', required=False)
         
         portfolio_parser = subparsers.add_parser('portfolio', help='Show portfolio with current prices and gains/losses')
         port_parser = subparsers.add_parser('port', help='Show portfolio (alias for portfolio)')
@@ -321,6 +462,9 @@ def main():
         
         tax_show_parser = subparsers.add_parser('tax-show', help='Show current tax configuration')
         
+        trades_parser = subparsers.add_parser('trades', help='Show trade history for a stock')
+        trades_parser.add_argument('ticker', help='Stock ticker symbol')
+        
         args = parser.parse_args()
         
         if args.command == 'buy':
@@ -329,11 +473,8 @@ def main():
         
         elif args.command == 'sell':
             try:
-                remove_stock(args.ticker, args.shares)
-                if args.shares:
-                    print(f"Sold {args.shares} shares of {args.ticker.upper()}")
-                else:
-                    print(f"Sold all shares of {args.ticker.upper()}")
+                remove_stock(args.ticker, args.shares, args.price, args.date)
+                print(f"Sold {args.shares} shares of {args.ticker.upper()} at ${args.price:.2f}" + (f" on {args.date}" if args.date else ""))
             except ValueError as e:
                 print(f"Error: {e}")
         
@@ -366,6 +507,9 @@ def main():
             print(f"  Long-term Federal: {config['long_term_federal']}%")
             print(f"  State: {config['state']}%")
             print(f"  NII: {config['nii']}")
+        
+        elif args.command == 'trades':
+            show_trades(args.ticker)
     
     else:
         # Treat as chart command
