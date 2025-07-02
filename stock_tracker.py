@@ -156,8 +156,8 @@ def show_portfolio():
     portfolio_table.add_column("Ticker", style="dim", justify="left")
     portfolio_table.add_column("Shares", justify="right")
     portfolio_table.add_column("Avg Price", justify="right")
-    portfolio_table.add_column("Value", justify="right")
-    portfolio_table.add_column("Change", justify="right")
+    portfolio_table.add_column("Total Value", justify="right")
+    portfolio_table.add_column("Price Change", justify="right")
     portfolio_table.add_column("After-tax", justify="right")
     for ticker, holding in holdings.items():
         shares = holding['shares']
@@ -241,9 +241,9 @@ def show_portfolio():
     total_table.add_column("Total", style="dim", justify="left")
     total_table.add_column("Amount", justify="right")
     total_table.add_row("Total Cost", f"${total_cost:,.2f}")
-    total_table.add_row("Change", rich_gain_loss(total_gain_loss, arrow, color))    
+    total_table.add_row("Price Change", rich_gain_loss(total_gain_loss, arrow, color))  
     total_table.add_row("Total Value", f"${total_value:,.2f}")
-    total_table.add_row("Total taxes", f"[red](${total_short_term_tax + total_long_term_tax:,.2f})[/red]")            
+    total_table.add_row("Total Taxes", f"[red](${total_short_term_tax + total_long_term_tax:,.2f})[/red]")            
     total_table.add_row("After-tax Change", rich_gain_loss(total_after_tax_gain, at_arrow, at_color))
     
     # Calculate total cash value (original cost + after-tax gain)
